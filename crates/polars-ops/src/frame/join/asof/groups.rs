@@ -155,6 +155,50 @@ where
     }
 }
 
+// Function to check if the data is sorted within groups
+fn check_sorted_by_numeric<T, S>(
+    by_chunked: &ChunkedArray<S>,
+    asof_chunked: &ChunkedArray<T>
+)
+where
+    T: PolarsDataType,
+    T::Native: PartialOrd,
+    S: PolarsNumericType,
+    S::Native: TotalHash + TotalEq + DirtyHash + ToTotalOrd,
+    <S::Native as ToTotalOrd>::TotalOrdItem: Send + Sync + Copy + Hash + Eq + DirtyHash + IsNull,
+{
+    let mut max_values: HashMap<&S, T::Native> = HashMap::new();
+    //let mut max_values: HashMap<&[u8], F::Native> = HashMap::new();
+
+    for (by_val, asof_val) in by_chunked.iter().zip(asof_chunked.iter()) {
+        let x = asof_val.unwrap();
+        
+        match (by_val, asof_val) {
+            (Some(by_val), Some(asof_val)) => {
+                let y = asof_val;
+                match max_values.entry(by_val) {
+                    hashbrown::hash_map::Entry::Vacant(e) => {
+                        // First occurrence of this group, set the initial max value
+                        e.insert(asof_val);
+                    }
+                    hashbrown::hash_map::Entry::Occupied(mut e) => {
+                        let max_value = e.get_mut();
+                        // Check if the current asof value is less than the max value seen so far
+                        if asof_val < *max_value {
+                            polars_bail!(nyi = "Not sorted");
+                        }
+                        // Update the max value if the current asof value is greater
+                        *max_value = asof_val;
+                    }
+                }
+            }
+            (Some(_), None) => continue,
+            _ => continue,
+        }
+    }
+}
+
+
 fn asof_join_by_numeric<T, S, A, F>(
     by_left: &ChunkedArray<S>,
     by_right: &ChunkedArray<S>,
@@ -170,6 +214,9 @@ where
     A: for<'a> AsofJoinState<T::Physical<'a>>,
     F: Sync + for<'a> Fn(T::Physical<'a>, T::Physical<'a>) -> bool,
 {
+    check_sorted_by_numeric(by_left, left_asof);
+    check_sorted_by_numeric(by_right, right_asof);
+
     let (left_asof, right_asof) = POOL.join(|| left_asof.rechunk(), || right_asof.rechunk());
     let left_val_arr = left_asof.downcast_iter().next().unwrap();
     let right_val_arr = right_asof.downcast_iter().next().unwrap();
@@ -592,6 +639,115 @@ fn dispatch_join_type(
     }
 }
 
+// Function to check if the data is sorted within groups
+fn check_sorted<F, T>(
+    by_chunked: &ChunkedArray<T>,
+    asof_chunked: &ChunkedArray<F>,
+    hash_fn: impl Fn(&T) -> &[u8]
+)
+where
+    T: PolarsDataType,
+    F: PolarsNumericType,
+    F::Native: PartialOrd + Copy,
+{
+    let mut max_values: HashMap<&[u8],  F::Native> = HashMap::new();
+    //let mut max_values: HashMap<&[u8], F::Native> = HashMap::new();
+
+    letx = asof_chunked.cont_slice().unwrap();
+
+    for (idx, (by_val, asof_val)) in by_chunked.iter().zip(asof_chunked.iter()).enumerate() {
+        match (by_val, asof_val) {
+            (Some(by_val), Some(asof_val)) => {
+                let hash_value = hash_fn(by_val);
+                match max_values.entry(hash_value) {
+                    hashbrown::hash_map::Entry::Vacant(e) => {
+                        // First occurrence of this group, set the initial max value
+                        e.insert(asof_val);
+                    }
+                    hashbrown::hash_map::Entry::Occupied(mut e) => {
+                        let max_value = e.get_mut();
+                        // Check if the current asof value is less than the max value seen so far
+                        if asof_val < *max_value {
+                            return Err(format!("Data is not sorted for group {:?} at row {}", by_val, idx));
+                        }
+                        // Update the max value if the current asof value is greater
+                        *max_value = asof_val;
+                    }
+                }
+            }
+            (Some(_), None) => continue,
+            _ => continue,
+        }
+    }
+}
+
+fn dispatch_check_sorted_by_type<F>(
+    by_series: &Series,
+    asof_chunked: &ChunkedArray<F>,
+)
+where
+    F: PolarsNumericType,
+    F::Native: PartialOrd + Copy,
+{
+    match by_series.dtype() {
+        DataType::Categorical(, )
+        DataType::String => {
+            check_sorted(by_series.str().unwrap(), asof_chunked, |s| {s.as_bytes()})
+        },
+        _ => {}
+    }
+}
+
+fn dispatch_check_sorted(
+    by_series: &Series,
+    asof_series: &Series
+)
+{
+    match asof_series.dtype() {
+        DataType::Int64 => {
+            dispatch_check_sorted_by_type(by_series, asof_series.i64().unwrap());
+        },
+        DataType::Int32 => {
+            dispatch_check_sorted_by_type(by_series, asof_series.i32().unwrap());
+        },
+        DataType::UInt64 => {
+            dispatch_check_sorted_by_type(by_series, asof_series.u64().unwrap());
+        },
+        DataType::UInt32 => {
+            dispatch_check_sorted_by_type(by_series, asof_series.u32().unwrap());
+        },
+        DataType::Float32 => {
+            dispatch_check_sorted_by_type(by_series, asof_series.f32().unwrap());
+        },
+        DataType::Float64 => {
+            dispatch_check_sorted_by_type(by_series, asof_series.f64().unwrap());
+        },
+        // DataType::Boolean => {
+        //     dispatch_check_sorted_by_type(by_series, asof_series.bool().unwrap());
+        // },
+        // DataType::Binary => {
+        //     dispatch_check_sorted_by_type(by_series, asof_series.binary().unwrap());
+        // },
+        // DataType::String => {
+        //     let ca = left_asof.str().unwrap();
+        //     let right_binary = right_asof.cast(&DataType::Binary).unwrap();
+        //     dispatch_join_strategy::<BinaryType>(
+        //         &ca.as_binary(),
+        //         &right_binary,
+        //         left_by,
+        //         right_by,
+        //         strategy,
+        //     )
+        // },
+        _ => {
+            dispatch_check_sorted_by_type(by_series, asof_series.cast(&DataType::Int32).unwrap().i32().unwrap());
+            // let right_asof = right_asof.cast(&DataType::Int32).unwrap();
+            // let ca = left_asof.i32().unwrap();
+            // dispatch_join_strategy_numeric(ca, &right_asof, left_by, right_by, strategy, tolerance)
+        },
+    }
+}
+
 pub trait AsofJoinBy: IntoDf {
     #[allow(clippy::too_many_arguments)]
     #[doc(hidden)]
@@ -639,6 +795,21 @@ pub trait AsofJoinBy: IntoDf {
 
         let mut left_by = self_df.select(left_by)?;
         let mut right_by = other_df.select(right_by)?;
+
+        let left_by_series = left_by.get_columns()[0].to_physical_repr().into_owned();
+        let right_by_series = right_by.get_columns()[0].to_physical_repr().into_owned();
+
+        //let x = left_by_series.str().unwrap();
+
+        dispatch_check_sorted(&left_by_series.str().unwrap(), left_key.datetime().unwrap());
+        dispatch_check_sorted(&right_by_series.str().unwrap(), right_key.datetime().unwrap());
+
+        // match (&left_asof.dtype(), left_by_series.dtype()) {
+        //     (DataType::Float64, DataType::StringType) => {
+        //         check_sorted(&left_by_series.str.unwrap(), left_key.f64().unwrap());
+        //     }
+        //     _ => {}
+        // }
 
         unsafe {
             for (l, r) in left_by
