@@ -21,7 +21,7 @@ trait AsofJoinState<T>: Default {
         left_val: &T,
         right: F,
         n_right: IdxSize,
-    ) -> Option<IdxSize>;
+    ) -> PolarsResult<Option<IdxSize>>;
 }
 
 #[derive(Default)]
@@ -36,16 +36,16 @@ impl<T: PartialOrd> AsofJoinState<T> for AsofJoinForwardState {
         left_val: &T,
         mut right: F,
         n_right: IdxSize,
-    ) -> Option<IdxSize> {
+    ) -> PolarsResult<Option<IdxSize>> {
         while (self.scan_offset) < n_right {
             if let Some(right_val) = right(self.scan_offset) {
                 if right_val >= *left_val {
-                    return Some(self.scan_offset);
+                    return Ok(Some(self.scan_offset));
                 }
             }
             self.scan_offset += 1;
         }
-        None
+        return Ok(None)
     }
 }
 
@@ -63,9 +63,25 @@ impl<T: PartialOrd> AsofJoinState<T> for AsofJoinBackwardState {
         left_val: &T,
         mut right: F,
         n_right: IdxSize,
-    ) -> Option<IdxSize> {
+    ) -> PolarsResult<Option<IdxSize>> {
         while self.scan_offset < n_right {
             if let Some(right_val) = right(self.scan_offset) {
+                
+                // If we encounter a smaller value than we've seen in this group so far, the data is unsorted
+                // and this join operation will produce an erroneous result
+                if let Some(best_index) = self.best_bound {
+                    if let Some(max_right) = right(best_index) {
+                        if right_val < max_right {
+                            // Return an error using PolarsResult
+                            return Err(PolarsError::InvalidOperation(
+                                format!(
+                                    "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
+                                ).into()
+                            ));
+                        }
+                    }
+                }
+
                 if right_val <= *left_val {
                     self.best_bound = Some(self.scan_offset);
                 } else {
@@ -74,7 +90,7 @@ impl<T: PartialOrd> AsofJoinState<T> for AsofJoinBackwardState {
             }
             self.scan_offset += 1;
         }
-        self.best_bound
+        Ok(self.best_bound)
     }
 }
 
@@ -92,7 +108,7 @@ impl<T: NumericNative> AsofJoinState<T> for AsofJoinNearestState {
         left_val: &T,
         mut right: F,
         n_right: IdxSize,
-    ) -> Option<IdxSize> {
+    ) -> PolarsResult<Option<IdxSize>> {
         // Skipping ahead to the first value greater than left_val. This is
         // cheaper than computing differences.
         while self.scan_offset < n_right {
@@ -138,7 +154,7 @@ impl<T: NumericNative> AsofJoinState<T> for AsofJoinNearestState {
             self.scan_offset += 1;
         }
 
-        self.best_bound
+        Ok(self.best_bound)
     }
 }
 

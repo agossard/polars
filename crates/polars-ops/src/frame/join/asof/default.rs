@@ -29,7 +29,7 @@ where
                 // SAFETY: next() only calls with indices < right.len().
                 |j| Some(unsafe { right.value_unchecked(j as usize) }),
                 right.len() as IdxSize,
-            ) {
+            ).unwrap() {  // SAFETY: We should never get an error since we have pre-checked sortedness  
                 // SAFETY: r_idx is non-null and valid.
                 let val_r = unsafe { right.value_unchecked(r_idx as usize) };
                 out[i] = r_idx;
@@ -44,7 +44,7 @@ where
                     // SAFETY: next() only calls with indices < right.len().
                     |j| unsafe { right.get_unchecked(j as usize) },
                     right.len() as IdxSize,
-                ) {
+                ).unwrap() { // SAFETY: We should never get an error since we have pre-checked sortedness  
                     // SAFETY: r_idx is non-null and valid.
                     let val_r = unsafe { right.value_unchecked(r_idx as usize) };
                     out[i] = r_idx;

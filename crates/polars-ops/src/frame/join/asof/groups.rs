@@ -125,7 +125,7 @@ fn asof_in_group<'a, T, A, F>(
     right_grp_idxs: &[IdxSize],
     group_states: &mut PlHashMap<IdxSize, A>,
     filter: F,
-) -> Option<IdxSize>
+) -> PolarsResult<Option<IdxSize>>
 where
     T: PolarsDataType,
     A: AsofJoinState<T::Physical<'a>>,
@@ -133,25 +133,35 @@ where
 {
     // We use the index of the first element in a group as an identifier to
     // associate with the group state.
-    let id = right_grp_idxs.first()?;
+    let Some(id) = right_grp_idxs.first() else {
+        return Ok(None);
+    };
     let grp_state = group_states.entry(*id).or_default();
 
     unsafe {
-        let r_grp_idx = grp_state.next(
+        let r_grp_idx = match grp_state.next(
             &left_val,
             |i| {
                 // SAFETY: the group indices are valid, and next() only calls with
                 // i < right_grp_idxs.len().
                 right_val_arr.get_unchecked(*right_grp_idxs.get_unchecked(i as usize) as usize)
             },
-            right_grp_idxs.len() as IdxSize,
-        )?;
+            right_grp_idxs.len() as IdxSize,  
+
+        ) {
+            Ok(idx) => idx,
+            Err(err) => return Err(err), // Propagate error from next()
+        };
+
+        let Some(r_grp_idx) = r_grp_idx else {
+            return Ok(None);
+        };
 
         // SAFETY: r_grp_idx is valid, as is r_idx (which must be non-null) if
         // we get here.
         let r_idx = *right_grp_idxs.get_unchecked(r_grp_idx as usize);
         let right_val = right_val_arr.value_unchecked(r_idx as usize);
-        filter(left_val, right_val).then_some(r_idx)
+        Ok(filter(left_val, right_val).then_some(r_idx))
     }
 }
 
@@ -222,19 +232,38 @@ where
                     results.push(NullableIdxSize::null());
                     continue;
                 };
-                let id = asof_in_group::<T, A, &F>(
+                let id = match asof_in_group::<T, A, &F>(
                     left_val,
                     right_val_arr,
                     right_grp_idxs.as_slice(),
                     &mut group_states,
                     &filter,
-                );
+                ) {
+                    Ok(id) => id,
+                    Err(err) => return Err(err), // Return the error from the closure
+                };
+
                 results.push(materialize_nullable(id));
             }
-            results
+            Ok(results)
         });
 
     let bufs = POOL.install(|| out.collect::<Vec<_>>());
+
+    for x in &bufs {
+        if x.is_err() {
+            // We should return the actual error, but I don't know how how to correctly move it out
+            // of the vector
+            return Err(PolarsError::InvalidOperation(
+                format!(
+                    "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
+                ).into()
+            ));
+        }
+    }
+    
+    let bufs: Vec<_> = bufs.iter().map(|x| x.as_ref().unwrap()).collect();
+
     Ok(flatten_nullable(&bufs))
 }
 
@@ -244,7 +273,7 @@ fn asof_join_by_binary<T, A, F>(
     left_asof: &ChunkedArray<T>,
     right_asof: &ChunkedArray<T>,
     filter: F,
-) -> IdxArr
+) -> PolarsResult<IdxArr>
 where
     T: PolarsDataType,
     A: for<'a> AsofJoinState<T::Physical<'a>>,
@@ -287,20 +316,39 @@ where
                     results.push(NullableIdxSize::null());
                     continue;
                 };
-                let id = asof_in_group::<T, A, &F>(
+                let id = match asof_in_group::<T, A, &F>(
                     left_val,
                     right_val_arr,
                     right_grp_idxs.as_slice(),
                     &mut group_states,
                     &filter,
-                );
+                ) {
+                    Ok(id) => id,
+                    Err(err) => return Err(err), // Return the error from the closure
+                };
 
                 results.push(materialize_nullable(id));
             }
-            results
+            Ok(results)
         });
+
     let bufs = POOL.install(|| iter.collect::<Vec<_>>());
-    flatten_nullable(&bufs)
+
+    for x in &bufs {
+        if x.is_err() {
+            // We should return the actual error, but I don't know how how to correctly move it out
+            // of the vector
+            return Err(PolarsError::InvalidOperation(
+                format!(
+                    "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
+                ).into()
+            ));
+        }
+    }
+    
+    let bufs: Vec<_> = bufs.iter().map(|x| x.as_ref().unwrap()).collect();
+
+    Ok(flatten_nullable(&bufs))
 }
 
 fn asof_join_by_multiple<T, A, F>(
@@ -309,7 +357,7 @@ fn asof_join_by_multiple<T, A, F>(
     left_asof: &ChunkedArray<T>,
     right_asof: &ChunkedArray<T>,
     filter: F,
-) -> IdxArr
+) -> PolarsResult<IdxArr>
 where
     T: PolarsDataType,
     A: for<'a> AsofJoinState<T::Physical<'a>>,
@@ -367,21 +415,39 @@ where
                         results.push(NullableIdxSize::null());
                         continue;
                     };
-                    let id = asof_in_group::<T, A, &F>(
+                    let id = match asof_in_group::<T, A, &F>(
                         left_val,
                         right_val_arr,
                         &right_grp_idxs[..],
                         &mut group_states,
                         &filter,
-                    );
+                    ) {
+                        Ok(id) => id,
+                        Err(err) => return Err(err), // Return the error from the closure
+                    };
 
                     results.push(materialize_nullable(id));
                 }
             }
-            results
+            Ok(results)
         });
     let bufs = POOL.install(|| iter.collect::<Vec<_>>());
-    flatten_nullable(&bufs)
+
+    for x in &bufs {
+        if x.is_err() {
+            // We should return the actual error, but I don't know how how to correctly move it out
+            // of the vector
+            return Err(PolarsError::InvalidOperation(
+                format!(
+                    "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
+                ).into()
+            ));
+        }
+    }
+    
+    let bufs: Vec<_> = bufs.iter().map(|x| x.as_ref().unwrap()).collect();
+
+    Ok(flatten_nullable(&bufs))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,7 +488,7 @@ where
                     let right_by: &ChunkedArray<$T> = right_by_s.as_ref().as_ref().as_ref();
                     asof_join_by_numeric::<T, $T, A, F>(
                         left_by, right_by, left_asof, right_asof, filter,
-                    )?
+                    )
                 })
             },
             _ => {
@@ -438,12 +504,12 @@ where
                     (B::Small(left_by), B::Small(right_by)) => {
                         asof_join_by_numeric::<T, UInt32Type, A, F>(
                             &left_by, &right_by, left_asof, right_asof, filter,
-                        )?
+                        )
                     },
                     (B::Large(left_by), B::Large(right_by)) => {
                         asof_join_by_numeric::<T, UInt64Type, A, F>(
                             &left_by, &right_by, left_asof, right_asof, filter,
-                        )?
+                        )
                     },
                     // We have already asserted that the datatypes are the same.
                     _ => unreachable!(),
@@ -460,7 +526,7 @@ where
         }
         asof_join_by_multiple::<T, A, F>(left_by, right_by, left_asof, right_asof, filter)
     };
-    Ok(out)
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
