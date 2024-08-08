@@ -8,6 +8,9 @@ import polars as pl
 from polars.testing import assert_frame_equal
 from polars.testing.asserts.series import assert_series_equal
 
+from polars.exceptions import (
+    InvalidOperationError
+)
 
 def test_predicate_4906() -> None:
     one_day = timedelta(days=1)
@@ -31,6 +34,8 @@ def test_predicate_4906() -> None:
 
 
 def test_predicate_null_block_asof_join() -> None:
+    # ADG: This was previously looking for a successfull asof_join with nulls in the rows with time
+    # stamps out of order. This is now an error condition
     left = (
         pl.DataFrame(
             {
@@ -66,17 +71,15 @@ def test_predicate_null_block_asof_join() -> None:
         .set_sorted("timestamp")
     )
 
-    assert left.join_asof(right, by="id", on="timestamp").filter(
-        pl.col("value").is_not_null()
-    ).collect().to_dict(as_series=False) == {
-        "id": [1, 2, 3],
-        "timestamp": [
-            datetime(2022, 1, 1, 10, 0),
-            datetime(2022, 1, 1, 10, 1),
-            datetime(2022, 1, 1, 10, 2),
-        ],
-        "value": ["a", "b", "c"],
-    }
+    with pytest.raises(
+        InvalidOperationError,
+        match=(
+            "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
+        ),
+    ):
+        left.join_asof(right, by="id", on="timestamp").filter(
+            pl.col("value").is_not_null()
+        ).collect()
 
 
 def test_predicate_strptime_6558() -> None:
