@@ -25,7 +25,8 @@ where
     if left.null_count() == 0 && right.null_count() == 0 {
         for (i, val_l) in left.values_iter().enumerate() {
             if let Some(r_idx) = state.next(
-                &val_l,
+                i as IdxSize,
+                |j| Some(unsafe { left.value_unchecked(j as usize) }),
                 // SAFETY: next() only calls with indices < right.len().
                 |j| Some(unsafe { right.value_unchecked(j as usize) }),
                 right.len() as IdxSize,
@@ -40,7 +41,8 @@ where
         for (i, opt_val_l) in left.iter().enumerate() {
             if let Some(val_l) = opt_val_l {
                 if let Some(r_idx) = state.next(
-                    &val_l,
+                    i as IdxSize,
+                    |j| unsafe { left.get_unchecked(j as usize) },
                     // SAFETY: next() only calls with indices < right.len().
                     |j| unsafe { right.get_unchecked(j as usize) },
                     right.len() as IdxSize,

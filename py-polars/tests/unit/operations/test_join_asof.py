@@ -7,6 +7,7 @@ import pytest
 import polars as pl
 from polars.testing import assert_frame_equal
 
+from polars.exceptions import InvalidOperationError
 
 def test_asof_join_singular_right_11966() -> None:
     df = pl.DataFrame({"id": [1, 2, 3], "time": [0.9, 2.1, 2.8]}).sort("time")
@@ -449,6 +450,31 @@ def test_asof_join_sorted_by_group(capsys: Any) -> None:
 
     _, err = capsys.readouterr()
     assert "is not explicitly sorted" not in err
+
+@pytest.mark.parametrize("asof_strategy", ["forward", "backward", "nearest"])
+def test_sorted_safety(asof_strategy: str):
+
+    df1 = pl.DataFrame(
+        {
+            "key": ["a", "a", "a", "b", "b", "b"],
+            "asof_key": [2.0, 1.0, 3.0, 1.0, 2.0, 3.0],
+            "a": [102, 101, 103, 104, 105, 106],
+        }
+    ).sort(by=["key", "asof_key"])
+
+    df2 = pl.DataFrame(
+        {
+            "key": ["a", "a", "a", "b", "b", "b"],
+            "asof_key": [0.9, 1.9, 2.9, 0.9, 1.9, 2.9],
+            "b": [201, 202, 203, 204, 205, 206],
+        }
+    ).sort(by=["key", "asof_key"])
+
+    with pytest.raises(InvalidOperationError, match="argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"):
+        df1.join_asof(df2.sort("asof_key", descending=True), on="asof_key", by="key", strategy=asof_strategy)
+    
+    with pytest.raises(InvalidOperationError, match="argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"):
+        df1.sort("asof_key", descending=True).join_asof(df2, on="asof_key", by="key", strategy=asof_strategy)
 
 
 def test_asof_join_nearest() -> None:

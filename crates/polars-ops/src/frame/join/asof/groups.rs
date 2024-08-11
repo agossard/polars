@@ -120,7 +120,8 @@ fn materialize_nullable(idx: Option<IdxSize>) -> NullableIdxSize {
 }
 
 fn asof_in_group<'a, T, A, F>(
-    left_val: T::Physical<'a>,
+    left_val_idx: IdxSize,
+    left_val_arr: &'a T::Array,
     right_val_arr: &'a T::Array,
     right_grp_idxs: &[IdxSize],
     group_states: &mut PlHashMap<IdxSize, A>,
@@ -139,8 +140,15 @@ where
     let grp_state = group_states.entry(*id).or_default();
 
     unsafe {
+        let left_val = left_val_arr.get_unchecked(left_val_idx as usize).unwrap();
+
         let r_grp_idx = match grp_state.next(
-            &left_val,
+            left_val_idx,
+            |i| {
+                // SAFETY: the group indices are valid, and next() only calls with
+                // i < right_grp_idxs.len().
+                left_val_arr.get_unchecked(i as usize)
+            },
             |i| {
                 // SAFETY: the group indices are valid, and next() only calls with
                 // i < right_grp_idxs.len().
@@ -233,7 +241,8 @@ where
                     continue;
                 };
                 let id = match asof_in_group::<T, A, &F>(
-                    left_val,
+                    idx_left,
+                    left_val_arr,
                     right_val_arr,
                     right_grp_idxs.as_slice(),
                     &mut group_states,
@@ -317,7 +326,8 @@ where
                     continue;
                 };
                 let id = match asof_in_group::<T, A, &F>(
-                    left_val,
+                    idx_left,
+                    left_val_arr,
                     right_val_arr,
                     right_grp_idxs.as_slice(),
                     &mut group_states,
@@ -416,7 +426,8 @@ where
                         continue;
                     };
                     let id = match asof_in_group::<T, A, &F>(
-                        left_val,
+                        idx_left as IdxSize,
+                        left_val_arr,
                         right_val_arr,
                         &right_grp_idxs[..],
                         &mut group_states,
