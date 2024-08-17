@@ -28,8 +28,38 @@ trait AsofJoinState<T>: Default {
 #[derive(Default)]
 struct AsofJoinForwardState {
     scan_offset: IdxSize,
-    largest_right_idx: IdxSize,
-    largest_left_idx: IdxSize,
+    largest_right_idx: Option<IdxSize>,
+    largest_left_idx: Option<IdxSize>,
+}
+
+pub fn is_sorted<T: PartialOrd, F: FnMut(IdxSize) -> Option<T>, H: FnMut(IdxSize) -> Option<T>>(
+    left: &mut H,
+    right: &mut F,
+    largest_left_idx: Option<IdxSize>,
+    largest_right_idx: Option<IdxSize>,
+    left_val: &T,
+    right_val: &T,
+) -> bool {
+    // Check if the left as_of values are out of order (within this group)
+    if let Some(max_left_idx) = largest_left_idx {
+        if let Some(max_left_value) = left(max_left_idx) {
+            if left_val < &max_left_value {
+                return false;
+            }
+        }
+    }
+
+    // If we encounter a smaller value than we've seen in this group so far, the data is unsorted
+    // and this join operation will produce an erroneous result
+    if let Some(max_right_idx) =  largest_right_idx {
+        if let Some(max_right) = right(max_right_idx) {
+            if right_val < &max_right {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 impl<T: PartialOrd> AsofJoinState<T> for AsofJoinForwardState {
@@ -43,30 +73,22 @@ impl<T: PartialOrd> AsofJoinState<T> for AsofJoinForwardState {
     ) -> PolarsResult<Option<IdxSize>> {
         while (self.scan_offset) < n_right {
             if let (Some(right_val), Some(left_val)) = (right(self.scan_offset), left(left_val_idx)) {
-
-                // Check if the left as_of values are out of order (within this group)
-                if let Some(max_left_value) = left(self.largest_left_idx) {
-                    if left_val < max_left_value {
+                if !is_sorted(
+                    &mut left,
+                    &mut right,
+                    self.largest_left_idx,
+                    self.largest_right_idx,
+                    &left_val,
+                    &right_val) {
                         return Err(PolarsError::InvalidOperation(
                             format!(
                                 "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
                             ).into()
                         ));
-                    }
                 }
 
-                // If we encounter a smaller value than we've seen in this group so far, the data is unsorted
-                // and this join operation will produce an erroneous result
-                if let Some(max_right) = right(self.largest_right_idx) {
-                    if right_val < max_right {
-                        // Return an error using PolarsResult
-                        return Err(PolarsError::InvalidOperation(
-                            format!(
-                                "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
-                            ).into()
-                        ));
-                    }
-                }
+                self.largest_left_idx = Some(left_val_idx);
+                self.largest_right_idx = Some(self.scan_offset); 
 
                 if right_val >= left_val {
                     return Ok(Some(self.scan_offset));
@@ -83,7 +105,7 @@ struct AsofJoinBackwardState {
     // best_bound is the greatest right index <= left_val.
     best_bound: Option<IdxSize>,
     scan_offset: IdxSize,
-    largest_left_idx: IdxSize,
+    largest_left_idx: Option<IdxSize>,
 }
 
 impl<T: PartialOrd> AsofJoinState<T> for AsofJoinBackwardState {
@@ -98,32 +120,21 @@ impl<T: PartialOrd> AsofJoinState<T> for AsofJoinBackwardState {
         while self.scan_offset < n_right {
             if let (Some(right_val), Some(left_val)) = (right(self.scan_offset), left(left_val_idx)) {
                 
-                // Check if the left as_of values are out of order (within this group)
-                if let Some(max_left_value) = left(self.largest_left_idx) {
-                    if left_val < max_left_value {
+                if !is_sorted(
+                    &mut left,
+                    &mut right,
+                    self.largest_left_idx,
+                    self.best_bound,
+                    &left_val,
+                    &right_val) {
                         return Err(PolarsError::InvalidOperation(
                             format!(
                                 "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
                             ).into()
                         ));
-                    }
                 }
-                
 
-                // If we encounter a smaller value than we've seen in this group so far, the data is unsorted
-                // and this join operation will produce an erroneous result
-                if let Some(best_index) = self.best_bound {
-                    if let Some(max_right) = right(best_index) {
-                        if right_val < max_right {
-                            // Return an error using PolarsResult
-                            return Err(PolarsError::InvalidOperation(
-                                format!(
-                                    "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
-                                ).into()
-                            ));
-                        }
-                    }
-                }
+                self.largest_left_idx = Some(left_val_idx);
 
                 if right_val <= left_val {
                     self.best_bound = Some(self.scan_offset);
@@ -142,6 +153,7 @@ struct AsofJoinNearestState {
     // best_bound is the nearest value to left_val, with ties broken towards the last element.
     best_bound: Option<IdxSize>,
     scan_offset: IdxSize,
+    largest_left_idx: Option<IdxSize>,
 }
 
 impl<T: NumericNative> AsofJoinState<T> for AsofJoinNearestState {
@@ -157,6 +169,23 @@ impl<T: NumericNative> AsofJoinState<T> for AsofJoinNearestState {
         // cheaper than computing differences.
         while self.scan_offset < n_right {
             if let (Some(scan_right_val), Some(left_val)) = (right(self.scan_offset), left(left_val_idx)) {
+
+                if !is_sorted(
+                    &mut left,
+                    &mut right,
+                    self.largest_left_idx,
+                    Some(self.scan_offset),
+                    &left_val,
+                    &scan_right_val) {
+                        return Err(PolarsError::InvalidOperation(
+                            format!(
+                                "argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"
+                            ).into()
+                        ));
+                }
+               
+                self.largest_left_idx = Some(left_val_idx);
+
                 if scan_right_val <= left_val {
                     self.best_bound = Some(self.scan_offset);
                 } else {

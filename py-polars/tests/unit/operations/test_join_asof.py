@@ -451,8 +451,13 @@ def test_asof_join_sorted_by_group(capsys: Any) -> None:
     _, err = capsys.readouterr()
     assert "is not explicitly sorted" not in err
 
-@pytest.mark.parametrize("asof_strategy", ["forward", "backward", "nearest"])
-def test_sorted_safety(asof_strategy: str):
+@pytest.mark.parametrize("asof_strategy,do_lazy", [("forward", False),
+                                                   ("forward", True),
+                                                   ("backward", False),
+                                                   ("backward", True),
+                                                   ("nearest", False),
+                                                   ("nearest", True)])
+def test_sorted_safety(asof_strategy: str, do_lazy: bool):
 
     df1 = pl.DataFrame(
         {
@@ -470,12 +475,24 @@ def test_sorted_safety(asof_strategy: str):
         }
     ).sort(by=["key", "asof_key"])
 
-    with pytest.raises(InvalidOperationError, match="argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"):
-        df1.join_asof(df2.sort("asof_key", descending=True), on="asof_key", by="key", strategy=asof_strategy)
-    
-    with pytest.raises(InvalidOperationError, match="argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"):
-        df1.sort("asof_key", descending=True).join_asof(df2, on="asof_key", by="key", strategy=asof_strategy)
+    if do_lazy:
+        df1 = df1.lazy()
+        df2 = df2.lazy()
 
+    # This should be legal because asof_key is sorted within the groups
+    result = df1.join_asof(df2.sort("key", "asof_key"), on="asof_key", by="key", strategy=asof_strategy)
+    if do_lazy:
+        result.collect()
+
+    with pytest.raises(InvalidOperationError, match="argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"):
+        result = df1.join_asof(df2.sort("asof_key", descending=True), on="asof_key", by="key", strategy=asof_strategy)
+        if do_lazy:
+            result.collect()
+
+    with pytest.raises(InvalidOperationError, match="argument in operation 'join_asof' is not sorted, please sort the 'expr/series/column' first"):
+        result = df1.sort("asof_key", descending=True).join_asof(df2, on="asof_key", by="key", strategy=asof_strategy)
+        if do_lazy:
+            result.collect()
 
 def test_asof_join_nearest() -> None:
     # Generic join_asof
