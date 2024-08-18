@@ -60,7 +60,7 @@ impl DslBuilder {
         };
 
         Ok(DslPlan::Scan {
-            paths: Arc::new(Mutex::new((Arc::new([]), true))),
+            paths: Arc::new(Mutex::new((Arc::new(vec![]), true))),
             file_info: Arc::new(RwLock::new(Some(file_info))),
             hive_parts: None,
             predicate: None,
@@ -78,8 +78,8 @@ impl DslBuilder {
 
     #[cfg(feature = "parquet")]
     #[allow(clippy::too_many_arguments)]
-    pub fn scan_parquet<P: Into<Arc<[std::path::PathBuf]>>>(
-        paths: P,
+    pub fn scan_parquet(
+        paths: Arc<Vec<std::path::PathBuf>>,
         n_rows: Option<usize>,
         cache: bool,
         parallel: polars_io::parquet::read::ParallelStrategy,
@@ -126,8 +126,8 @@ impl DslBuilder {
 
     #[cfg(feature = "ipc")]
     #[allow(clippy::too_many_arguments)]
-    pub fn scan_ipc<P: Into<Arc<[std::path::PathBuf]>>>(
-        paths: P,
+    pub fn scan_ipc(
+        paths: Arc<Vec<std::path::PathBuf>>,
         options: IpcScanOptions,
         n_rows: Option<usize>,
         cache: bool,
@@ -166,8 +166,8 @@ impl DslBuilder {
 
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "csv")]
-    pub fn scan_csv<P: Into<Arc<[std::path::PathBuf]>>>(
-        paths: P,
+    pub fn scan_csv(
+        paths: Arc<Vec<std::path::PathBuf>>,
         read_options: CsvReadOptions,
         cache: bool,
         cloud_options: Option<CloudOptions>,
@@ -346,7 +346,7 @@ impl DslBuilder {
         .into()
     }
 
-    pub fn explode(self, columns: Vec<Expr>) -> Self {
+    pub fn explode(self, columns: Vec<Selector>) -> Self {
         DslPlan::MapFunction {
             input: Arc::new(self.0),
             function: DslFunction::Explode { columns },
@@ -354,7 +354,8 @@ impl DslBuilder {
         .into()
     }
 
-    pub fn unpivot(self, args: UnpivotArgs) -> Self {
+    #[cfg(feature = "pivot")]
+    pub fn unpivot(self, args: UnpivotArgsDSL) -> Self {
         DslPlan::MapFunction {
             input: Arc::new(self.0),
             function: DslFunction::Unpivot { args },
@@ -373,7 +374,7 @@ impl DslBuilder {
         .into()
     }
 
-    pub fn distinct(self, options: DistinctOptions) -> Self {
+    pub fn distinct(self, options: DistinctOptionsDSL) -> Self {
         DslPlan::Distinct {
             input: Arc::new(self.0),
             options,
@@ -424,7 +425,7 @@ impl DslBuilder {
     ) -> Self {
         DslPlan::MapFunction {
             input: Arc::new(self.0),
-            function: DslFunction::FunctionNode(FunctionNode::OpaquePython {
+            function: DslFunction::OpaquePython(OpaquePythonUdf {
                 function,
                 schema,
                 predicate_pd: optimizations.contains(OptState::PREDICATE_PUSHDOWN),
@@ -450,7 +451,7 @@ impl DslBuilder {
 
         DslPlan::MapFunction {
             input: Arc::new(self.0),
-            function: DslFunction::FunctionNode(FunctionNode::Opaque {
+            function: DslFunction::FunctionIR(FunctionIR::Opaque {
                 function,
                 schema,
                 predicate_pd: optimizations.contains(OptState::PREDICATE_PUSHDOWN),
@@ -465,9 +466,6 @@ impl DslBuilder {
 
 /// Initialize paths as non-expanded.
 #[cfg(any(feature = "csv", feature = "ipc", feature = "parquet"))]
-fn init_paths<P>(paths: P) -> Arc<Mutex<(Arc<[PathBuf]>, bool)>>
-where
-    P: Into<Arc<[std::path::PathBuf]>>,
-{
-    Arc::new(Mutex::new((paths.into(), false)))
+fn init_paths(paths: Arc<Vec<std::path::PathBuf>>) -> Arc<Mutex<(Arc<Vec<PathBuf>>, bool)>> {
+    Arc::new(Mutex::new((paths, false)))
 }

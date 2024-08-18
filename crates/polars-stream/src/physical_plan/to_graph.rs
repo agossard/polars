@@ -243,12 +243,25 @@ fn to_graph_rec<'a>(
                 .add_node(nodes::ordered_union::OrderedUnionNode::new(), input_keys)
         },
 
-        Zip { inputs } => {
+        Zip {
+            inputs,
+            input_schemas,
+            null_extend,
+        } => {
             let input_keys = inputs
                 .iter()
                 .map(|i| to_graph_rec(*i, ctx))
                 .collect::<Result<Vec<_>, _>>()?;
-            ctx.graph.add_node(nodes::zip::ZipNode::new(), input_keys)
+            ctx.graph.add_node(
+                nodes::zip::ZipNode::new(*null_extend, input_schemas.clone()),
+                input_keys,
+            )
+        },
+
+        Multiplexer { input } => {
+            let input_key = to_graph_rec(*input, ctx)?;
+            ctx.graph
+                .add_node(nodes::multiplexer::MultiplexerNode::new(), [input_key])
         },
     };
 
