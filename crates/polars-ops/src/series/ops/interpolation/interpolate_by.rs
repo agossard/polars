@@ -266,7 +266,8 @@ where
 pub fn interpolate_by(s: &Column, by: &Column, by_is_sorted: bool) -> PolarsResult<Column> {
     polars_ensure!(s.len() == by.len(), InvalidOperation: "`by` column must be the same length as Series ({}), got {}", s.len(), by.len());
 
-    fn func<T, F>(
+    // Helper: interpolate only on non-null positions, scatter back
+    fn func_with_nulls<T, F>(
         ca: &ChunkedArray<T>,
         by: &ChunkedArray<F>,
         is_sorted: bool,
@@ -276,55 +277,81 @@ pub fn interpolate_by(s: &Column, by: &Column, by_is_sorted: bool) -> PolarsResu
         F: PolarsNumericType,
         ChunkedArray<T>: IntoColumn,
     {
-        if is_sorted {
-            interpolate_impl_by_sorted(ca, by, |y_start, y_end, x, out| unsafe {
-                signed_interp_by_sorted(y_start, y_end, x, out)
-            })
-            .map(|x| x.into_column())
+        // Find non-null positions in 'by'
+    let mask = by.is_not_null();
+    let idx: Vec<u32> = mask.iter().enumerate().filter_map(|(i, v)| if v == Some(true) { Some(i as u32) } else { None }).collect();
+        if idx.len() == by.len() {
+            // No nulls, fast path
+            if is_sorted {
+                interpolate_impl_by_sorted(ca, by, |y_start, y_end, x, out| unsafe {
+                    signed_interp_by_sorted(y_start, y_end, x, out)
+                })
+                .map(|x| x.into_column())
+            } else {
+                interpolate_impl_by(ca, by, |y_start, y_end, x, out, sorting_indices| unsafe {
+                    signed_interp_by(y_start, y_end, x, out, sorting_indices)
+                })
+                .map(|x| x.into_column())
+            }
         } else {
-            interpolate_impl_by(ca, by, |y_start, y_end, x, out, sorting_indices| unsafe {
-                signed_interp_by(y_start, y_end, x, out, sorting_indices)
-            })
-            .map(|x| x.into_column())
+            // Filter to non-null positions
+            let ca_filtered = ca.take(&idx)?;
+            let by_filtered = by.take(&idx)?;
+            let interpolated = if is_sorted {
+                interpolate_impl_by_sorted(&ca_filtered, &by_filtered, |y_start, y_end, x, out| unsafe {
+                    signed_interp_by_sorted(y_start, y_end, x, out)
+                })?
+            } else {
+                interpolate_impl_by(&ca_filtered, &by_filtered, |y_start, y_end, x, out, sorting_indices| unsafe {
+                    signed_interp_by(y_start, y_end, x, out, sorting_indices)
+                })?
+            };
+            // Scatter results back
+            let interpolated_vals = interpolated.into_iter().collect::<Vec<_>>();
+            let mut out_vec = ca.iter().collect::<Vec<_>>();
+            for (i, &out_idx) in idx.iter().enumerate() {
+                out_vec[out_idx as usize] = interpolated_vals[i];
+            }
+            Ok(ChunkedArray::<T>::from_iter(out_vec).into_column())
         }
     }
 
     match (s.dtype(), by.dtype()) {
         (DataType::Float64, DataType::Float64) => {
-            func(s.f64().unwrap(), by.f64().unwrap(), by_is_sorted)
+            func_with_nulls(s.f64().unwrap(), by.f64().unwrap(), by_is_sorted)
         },
         (DataType::Float64, DataType::Float32) => {
-            func(s.f64().unwrap(), by.f32().unwrap(), by_is_sorted)
+            func_with_nulls(s.f64().unwrap(), by.f32().unwrap(), by_is_sorted)
         },
         (DataType::Float32, DataType::Float64) => {
-            func(s.f32().unwrap(), by.f64().unwrap(), by_is_sorted)
+            func_with_nulls(s.f32().unwrap(), by.f64().unwrap(), by_is_sorted)
         },
         (DataType::Float32, DataType::Float32) => {
-            func(s.f32().unwrap(), by.f32().unwrap(), by_is_sorted)
+            func_with_nulls(s.f32().unwrap(), by.f32().unwrap(), by_is_sorted)
         },
         (DataType::Float64, DataType::Int64) => {
-            func(s.f64().unwrap(), by.i64().unwrap(), by_is_sorted)
+            func_with_nulls(s.f64().unwrap(), by.i64().unwrap(), by_is_sorted)
         },
         (DataType::Float64, DataType::Int32) => {
-            func(s.f64().unwrap(), by.i32().unwrap(), by_is_sorted)
+            func_with_nulls(s.f64().unwrap(), by.i32().unwrap(), by_is_sorted)
         },
         (DataType::Float64, DataType::UInt64) => {
-            func(s.f64().unwrap(), by.u64().unwrap(), by_is_sorted)
+            func_with_nulls(s.f64().unwrap(), by.u64().unwrap(), by_is_sorted)
         },
         (DataType::Float64, DataType::UInt32) => {
-            func(s.f64().unwrap(), by.u32().unwrap(), by_is_sorted)
+            func_with_nulls(s.f64().unwrap(), by.u32().unwrap(), by_is_sorted)
         },
         (DataType::Float32, DataType::Int64) => {
-            func(s.f32().unwrap(), by.i64().unwrap(), by_is_sorted)
+            func_with_nulls(s.f32().unwrap(), by.i64().unwrap(), by_is_sorted)
         },
         (DataType::Float32, DataType::Int32) => {
-            func(s.f32().unwrap(), by.i32().unwrap(), by_is_sorted)
+            func_with_nulls(s.f32().unwrap(), by.i32().unwrap(), by_is_sorted)
         },
         (DataType::Float32, DataType::UInt64) => {
-            func(s.f32().unwrap(), by.u64().unwrap(), by_is_sorted)
+            func_with_nulls(s.f32().unwrap(), by.u64().unwrap(), by_is_sorted)
         },
         (DataType::Float32, DataType::UInt32) => {
-            func(s.f32().unwrap(), by.u32().unwrap(), by_is_sorted)
+            func_with_nulls(s.f32().unwrap(), by.u32().unwrap(), by_is_sorted)
         },
         #[cfg(feature = "dtype-date")]
         (_, DataType::Date) => interpolate_by(s, &by.cast(&DataType::Int32).unwrap(), by_is_sorted),

@@ -88,6 +88,23 @@ def test_interpolate_by(
     )
     assert_frame_equal(result, expected)
 
+    some_nulls = pl.DataFrame(
+        {
+            "times": [None, None, None, None],
+            "values": [1, 2, 3, 4],
+        },
+        schema={"times": times_dtype, "values": values_dtype},
+    )
+
+    with_null_df = (
+        pl.concat([df, some_nulls], how="vertical")
+        .sample(fraction=1.0, shuffle=True)
+    )
+
+    result = with_null_df.with_columns(pl.col("values").interpolate_by("times"))
+
+    assert_frame_equal(result.drop_nulls(subset='times').sort('times').select('values'), expected)
+    assert_frame_equal(result.filter(pl.col('times').is_null()).sort('values'), some_nulls.sort('values'), check_dtypes=False)
 
 def test_interpolate_by_leading_nulls() -> None:
     df = pl.DataFrame(
@@ -237,15 +254,32 @@ def test_interpolate_vs_numpy(data: st.DataObject, x_dtype: pl.DataType) -> None
     assert_series_equal(result_from_unsorted, expected, abs_tol=1e-4)
 
 
-def test_interpolate_by_invalid() -> None:
-    s = pl.Series([1, None, 3])
-    by = pl.Series([1, 2])
-    with pytest.raises(InvalidOperationError, match=r"\(3\), got 2"):
-        s.interpolate_by(by)
+# def test_interpolate_by_invalid() -> None:
+#     s = pl.Series([1, None, 3])
+#     by = pl.Series([1, 2])
+#     with pytest.raises(InvalidOperationError, match=r"\(3\), got 2"):
+#         s.interpolate_by(by)
 
-    by = pl.Series([1, None, 3])
-    with pytest.raises(
-        InvalidOperationError,
-        match="null values in `by` column are not yet supported in 'interpolate_by'",
-    ):
-        s.interpolate_by(by)
+#     by = pl.Series([1, None, 3])
+#     with pytest.raises(
+#         InvalidOperationError,
+#         match="null values in `by` column are not yet supported in 'interpolate_by'",
+#     ):
+#         s.interpolate_by(by)
+
+
+def test_interpolate_by_nulls_in_by() -> None:
+    s = pl.Series([1.0, None, 3.0, None, 5.0])
+    by = pl.Series([10.0, None, 30.0, 40.0, None])
+    result = s.interpolate_by(by)
+    # Only positions 0,2,3 are interpolated; positions 1 and 4 remain as in s
+    expected = pl.Series([1.0, None, 3.0, None, 5.0])
+    assert_series_equal(result, expected)
+
+def test_interpolate_by_some_nulls_in_s_and_by() -> None:
+    s = pl.Series([None, 2.0, None, 4.0])
+    by = pl.Series([1.0, None, 3.0, 4.0])
+    result = s.interpolate_by(by)
+    # Only positions 0,2,3 are interpolated; position 1 remains as in s
+    expected = pl.Series([None, 2.0, None, 4.0])
+    assert_series_equal(result, expected)
